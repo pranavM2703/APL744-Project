@@ -1,0 +1,102 @@
+# ============================================================================
+# Default Configuration — FGM Inverse Design Pipeline
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Data Generation
+# ---------------------------------------------------------------------------
+data:
+  image_size: 256                        # Spatial resolution of microstructures
+  num_samples: 5000                      # Total dataset cardinality
+
+  # Ti-6Al-4V dataset (Stopka et al. / Zenodo)
+  zenodo:
+    record_id: ""                        # Zenodo record ID (set by user)
+    num_slices: 4000                     # 2D slices from 3D volumes
+    slice_axis: 2                        # Slice along z-axis
+    output_dir: "data/raw/images/ti64"   # Downloaded slice directory
+
+  # Gaussian Random Field augmentation (porous regime)
+  grf:
+    num_samples: 1000                    # Synthetic GRF samples
+    correlation_length: 30.0             # Spatial correlation length (pixels)
+    threshold: 0.5                       # Binarization threshold
+    output_dir: "data/raw/images/grf"    # GRF output directory
+
+  raw_image_dir: "data/raw/images"       # Combined image directory
+  labels_path: "data/raw/labels.csv"     # Physics labels (VF, E_eff)
+  latents_dir: "data/processed/latents"  # Encoded latent tensors
+
+# ---------------------------------------------------------------------------
+# Material Properties (Ti-6Al-4V)
+# ---------------------------------------------------------------------------
+material:
+  E_solid: 113.8                         # Young's modulus of solid phase [GPa]
+  nu_solid: 0.342                        # Poisson's ratio of solid phase
+  E_void: 1.0e-3                         # Young's modulus of void phase [GPa]
+  nu_void: 0.0                           # Poisson's ratio of void phase
+
+# ---------------------------------------------------------------------------
+# Variational Autoencoder (Frozen Encoder — Ostris 16-ch)
+# ---------------------------------------------------------------------------
+vae:
+  model_id: "ostris/vae-kl-f8-d16"      # HuggingFace checkpoint (same as micro_diffusion)
+  latent_channels: 16                    # Latent space channel depth
+  latent_size: 32                        # Spatial dims of latent (256/8)
+
+# ---------------------------------------------------------------------------
+# Diffusion Model (Sony MicroDiT_XL_2)
+# ---------------------------------------------------------------------------
+diffusion:
+  dit_arch: "MicroDiT_XL_2"                                              # Transformer backbone
+  dit_checkpoint_repo: "VSehwag24/MicroDiT"                               # HuggingFace repo
+  dit_checkpoint_file: "ckpts/dit_16_channel_37M_real_and_synthetic_data.pt"  # 16-ch model
+  text_encoder: "openclip:hf-hub:apple/DFN5B-CLIP-ViT-H-14-378"          # DFN5B-CLIP
+  in_channels: 16                                                          # Must match VAE
+  dtype: "bfloat16"                                                        # Model precision
+  edm:
+    sigma_min: 0.002
+    sigma_max: 80
+    P_mean: -0.6
+    P_std: 1.2
+    sigma_data: 0.9
+    num_steps: 18
+    rho: 7
+
+# ---------------------------------------------------------------------------
+# Physics Surrogate (Latent Stiffness Regressor)
+# ---------------------------------------------------------------------------
+surrogate:
+  architecture: "resnet18"               # Backbone architecture
+  input_channels: 16                     # Must match VAE latent channels
+  output_dim: 1                          # Scalar stiffness prediction
+  pretrained_backbone: false             # No ImageNet pretraining
+
+# ---------------------------------------------------------------------------
+# Training Protocol
+# ---------------------------------------------------------------------------
+training:
+  epochs: 100
+  batch_size: 32
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 5
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  seed: 42
+  num_workers: 4
+  checkpoint_dir: "checkpoints"
+  log_dir: "runs"                        # TensorBoard log directory
+
+# ---------------------------------------------------------------------------
+# Part 2 — Score Distillation Sampling
+# ---------------------------------------------------------------------------
+sds:
+  guidance_scale: 100.0
+  num_steps: 1000
+  noise_schedule: "edm"                  # Matches MicroDiT's EDM framework
+  target_stiffness_range: [50.0, 200.0]  # GPa — FGM gradient bounds
+  lambda_physics: 1.0                    # Weight for physics loss ∇_z L_phys

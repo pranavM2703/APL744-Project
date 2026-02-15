@@ -1,0 +1,47 @@
+# ============================================================================
+# Foundation Models for Inverse Design of Functionally Graded Materials
+# APL744 — Probabilistic Machine Learning in Mechanics
+# ============================================================================
+
+# Core Scientific Stack
+numpy>=1.24.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+pandas>=2.0.0
+
+# Deep Learning
+torch>=2.1.0
+torchvision>=0.16.0
+
+# ── Sony MicroDiffusion (SonyResearch/micro_diffusion) ─────────────────────
+# Install via: pip install -e . from the cloned repo, or:
+#   pip install git+https://github.com/SonyResearch/micro_diffusion.git
+# The following are its core dependencies:
+diffusers>=0.25.0
+transformers>=4.36.0
+accelerate>=0.25.0
+safetensors>=0.4.0
+mosaicml-composer>=0.22.0           # Composer framework (Sony training infra)
+easydict>=1.10
+open_clip_torch>=2.24.0             # Text encoder (DFN5B-CLIP)
+
+# HuggingFace Hub (checkpoint downloads)
+huggingface_hub>=0.20.0
+
+# Finite Element Homogenization
+sfepy>=2023.4
+
+# Image Processing
+Pillow>=10.0.0
+scikit-image>=0.21.0
+h5py>=3.9.0                          # 3D Zenodo dataset (HDF5/DREAM.3D)
+
+# Configuration & Utilities
+PyYAML>=6.0
+tqdm>=4.65.0
+
+# Experiment Tracking
+tensorboard>=2.14.0
+
+# Testing
+pytest>=7.4.0
