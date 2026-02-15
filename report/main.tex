@@ -1,0 +1,653 @@
+\documentclass[12pt,a4paper]{article}
+
+% ── Packages ────────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{physics}       % \pdv, \grad, \norm, etc.
+\usepackage{bm}            % bold math symbols
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{algorithm,algorithmic}
+\usepackage{enumitem}
+\usepackage{caption,subcaption}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc}
+
+% ── Macros ──────────────────────────────────────────────────────────────────
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\loss}{\mathcal{L}}
+\newcommand{\vf}{v_f}
+\newcommand{\Eeff}{E_{\mathrm{eff}}}
+\newcommand{\Etar}{E^{*}}
+\newcommand{\zvec}{\bm{z}}
+\newcommand{\xvec}{\bm{x}}
+\newcommand{\epsvec}{\bm{\varepsilon}}
+\newcommand{\sigvec}{\bm{\sigma}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+
+% ── Document ────────────────────────────────────────────────────────────────
+\title{%
+  \textbf{Foundation Models for Inverse Design of\\
+  Functionally Graded Materials}\\[6pt]
+  \large APL744 — Probabilistic Machine Learning in Mechanics\\
+  Part~1: Pipeline Development \& Mathematical Foundations
+}
+\author{Pranav Misra}
+\date{February 2025}
+
+\begin{document}
+\maketitle
+
+% ────────────────────────────────────────────────────────────────────────────
+\begin{abstract}
+We present a computational pipeline for the inverse design of functionally
+graded materials (FGMs) using a pre-trained latent diffusion model as a
+generative prior coupled with a differentiable physics surrogate.  The
+pipeline encodes binary Ti-6Al-4V microstructure images into a
+16-dimensional latent space via the Ostris variational autoencoder, trains a
+ResNet-18 stiffness regressor that maps latent codes to effective elastic
+modulus, and verifies end-to-end gradient flow as a prerequisite for Score
+Distillation Sampling (SDS).  All components are implemented, tested
+(16/16~validation tests), and validated against the EBSD-derived
+microstructure dataset from Zenodo (Record~15310081).
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Introduction and Problem Formulation}
+\label{sec:intro}
+% ════════════════════════════════════════════════════════════════════════════
+
+\subsection{The Inverse Design Problem}
+
+Let $\Omega \subset \R^2$ denote a representative volume element (RVE) of a
+heterogeneous material, and let $\chi : \Omega \to \{0,1\}$ be a binary
+microstructure field where $\chi(\xvec)=1$ indicates the solid (Ti-6Al-4V)
+phase and $\chi(\xvec)=0$ indicates the complementary phase (void, or beta-Ti).
+
+\begin{definition}[Forward Problem]
+Given a microstructure $\chi$, the \emph{forward problem} computes the
+effective elastic modulus via computational homogenization:
+\begin{equation}
+  \Eeff = \mathcal{H}[\chi] \in \R_{>0},
+  \label{eq:forward}
+\end{equation}
+where $\mathcal{H}$ is the homogenization operator (see \S\ref{sec:homog}).
+\end{definition}
+
+\begin{definition}[Inverse Problem]
+Given a target stiffness field $\Etar(x,y) : \Omega \to \R_{>0}$, find the
+optimal microstructure:
+\begin{equation}
+  \chi^{*} = \argmin_{\chi \in \{0,1\}^{|\Omega|}}
+    \bigl\| \mathcal{H}[\chi] - \Etar \bigr\|^2
+    \quad \text{s.t.} \quad \chi \in \mathcal{M},
+  \label{eq:inverse}
+\end{equation}
+where $\mathcal{M}$ is the manifold of physically admissible
+microstructures.
+\end{definition}
+
+Direct optimization of \eqref{eq:inverse} is intractable due to the
+combinatorial nature of $\{0,1\}^{|\Omega|}$ and the cost of evaluating
+$\mathcal{H}$.  We therefore reformulate the problem in a continuous latent
+space using a pre-trained generative model.
+
+\subsection{Latent-Space Reformulation}
+
+Let $\mathcal{E}_\phi : \R^{3 \times H \times W} \to \R^{C \times h \times w}$
+be a frozen VAE encoder and $\mathcal{D}_\phi$ its decoder, with
+$C=16$, $h=w=H/8=32$.  The inverse problem becomes:
+\begin{equation}
+  \zvec^{*} = \argmin_{\zvec \in \R^{16 \times 32 \times 32}}
+  \underbrace{\bigl\| f_\theta(\zvec) - \Etar \bigr\|^2}_{\loss_{\mathrm{phys}}}
+  + \lambda \underbrace{\loss_{\mathrm{SDS}}(\zvec)}_{\text{diffusion prior}},
+  \label{eq:latent_inverse}
+\end{equation}
+where $f_\theta$ is the physics surrogate and $\loss_{\mathrm{SDS}}$ is the
+Score Distillation Sampling loss that constrains $\zvec$ to lie on the
+natural image manifold of the generative prior.
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Variational Autoencoder: Ostris 16-Channel VAE}
+\label{sec:vae}
+% ════════════════════════════════════════════════════════════════════════════
+
+\subsection{Architecture}
+
+The VAE follows the KL-regularized autoencoder framework
+\cite{kingma2014auto} with an $8\times$ spatial downsampling architecture:
+\begin{equation}
+  \text{Encoder:} \quad \xvec \in \R^{3 \times 256 \times 256}
+  \;\xrightarrow{\mathcal{E}_\phi}\;
+  (\bm{\mu}, \log\bm{\sigma}^2) \in \R^{16 \times 32 \times 32} \times \R^{16 \times 32 \times 32}.
+\end{equation}
+
+Latent samples are drawn via the reparameterization trick:
+\begin{equation}
+  \zvec = \bm{\mu} + \bm{\sigma} \odot \bm{\epsilon},
+  \qquad \bm{\epsilon} \sim \N(\bm{0}, \bm{I}),
+  \label{eq:reparam}
+\end{equation}
+and scaled by the VAE's intrinsic scaling factor $s$:
+\begin{equation}
+  \tilde{\zvec} = s \cdot \zvec,
+  \qquad s = \texttt{vae.config.scaling\_factor}.
+  \label{eq:latent_scaling}
+\end{equation}
+
+\subsection{16-Channel Latent Space}
+
+The choice of $C=16$ channels (vs.\ the standard $C=4$ in Stable Diffusion)
+is motivated by microstructural fidelity.  The information-theoretic capacity
+of the latent code scales as:
+\begin{equation}
+  I(\xvec; \zvec) \leq C \cdot h \cdot w \cdot \log_2\!\bigl(1 + \mathrm{SNR}\bigr),
+\end{equation}
+so quadrupling the channel count provides up to $4\times$ more bits for
+reconstructing fine-grained features such as grain boundary morphology and
+pore-tip stress concentrations.
+
+\subsection{Frozen Encoder for the Physics Pipeline}
+
+All VAE parameters $\phi$ are frozen during training:
+\begin{equation}
+  \nabla_\phi \loss = \bm{0}.
+\end{equation}
+The encoder serves as a fixed, differentiable mapping from pixel space to
+latent space, enabling the downstream surrogate $f_\theta$ to be trained
+entirely in the compressed $16 \times 32 \times 32$ domain.
+
+Decoding follows the inverse path used by Sony's \texttt{LatentDiffusion.generate()}:
+\begin{equation}
+  \hat{\xvec} = \mathcal{D}_\phi\!\left(\frac{\zvec}{s}\right),
+  \qquad \hat{\xvec} = \mathrm{clamp}\!\left(\frac{\hat{\xvec}}{2} + 0.5,\; 0,\; 1\right).
+  \label{eq:decode}
+\end{equation}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Diffusion Prior: MicroDiT\texorpdfstring{$_{\text{XL/2}}$}{\_XL/2}}
+\label{sec:diffusion}
+% ════════════════════════════════════════════════════════════════════════════
+
+\subsection{Elucidated Diffusion Model (EDM)}
+
+The Sony MicroDiffusion framework \cite{sehwag2024microdit} uses the EDM
+formulation of Karras et al.\ \cite{karras2022edm}.  The forward noising
+process adds Gaussian noise at level $\sigma$:
+\begin{equation}
+  \zvec_\sigma = \zvec_0 + \sigma\, \bm{\epsilon},
+  \qquad \bm{\epsilon} \sim \N(\bm{0}, \bm{I}).
+  \label{eq:forward_noise}
+\end{equation}
+
+\subsection{EDM Preconditioning}
+
+The denoiser network $F_\theta$ is wrapped with signal-dependent scaling:
+\begin{align}
+  c_{\mathrm{skip}}(\sigma) &= \frac{\sigma_{\mathrm{data}}^2}{\sigma^2 + \sigma_{\mathrm{data}}^2}, \label{eq:cskip}\\
+  c_{\mathrm{out}}(\sigma) &= \frac{\sigma \cdot \sigma_{\mathrm{data}}}{\sqrt{\sigma^2 + \sigma_{\mathrm{data}}^2}}, \label{eq:cout}\\
+  c_{\mathrm{in}}(\sigma) &= \frac{1}{\sqrt{\sigma_{\mathrm{data}}^2 + \sigma^2}}, \label{eq:cin}\\
+  c_{\mathrm{noise}}(\sigma) &= \frac{\ln \sigma}{4}, \label{eq:cnoise}
+\end{align}
+where $\sigma_{\mathrm{data}} = 0.9$.  The denoised prediction is:
+\begin{equation}
+  D_\theta(\zvec_\sigma, \sigma, \bm{y}) =
+    c_{\mathrm{skip}} \cdot \zvec_\sigma
+    + c_{\mathrm{out}} \cdot F_\theta\!\bigl(c_{\mathrm{in}} \cdot \zvec_\sigma,\; c_{\mathrm{noise}},\; \bm{y}\bigr),
+  \label{eq:denoiser}
+\end{equation}
+where $\bm{y}$ denotes the conditioning embeddings from DFN5B-CLIP.
+
+\subsection{EDM Training Objective}
+
+The training loss weights the per-sample MSE by the signal-to-noise ratio:
+\begin{equation}
+  \loss_{\mathrm{EDM}} = \E_{\sigma \sim p(\sigma)}\!\left[
+    w(\sigma)\, \bigl\| D_\theta(\zvec_\sigma, \sigma, \bm{y}) - \zvec_0 \bigr\|^2
+  \right],
+  \label{eq:edm_loss}
+\end{equation}
+where the noise distribution is log-normal:
+\begin{equation}
+  \ln \sigma \sim \N(P_{\mathrm{mean}},\, P_{\mathrm{std}}^2)
+  \qquad \text{with } P_{\mathrm{mean}} = -0.6,\; P_{\mathrm{std}} = 1.2,
+\end{equation}
+and the weight function is:
+\begin{equation}
+  w(\sigma) = \frac{\sigma^2 + \sigma_{\mathrm{data}}^2}{(\sigma \cdot \sigma_{\mathrm{data}})^2}.
+  \label{eq:edm_weight}
+\end{equation}
+
+\subsection{EDM Sampler (Heun's Method)}
+
+Generation follows a deterministic ODE discretized with Heun's second-order
+method over $N$ steps.  The noise schedule
+$\{\sigma_i\}_{i=0}^{N}$ is defined by:
+\begin{equation}
+  \sigma_i = \left(
+    \sigma_{\max}^{1/\rho} + \frac{i}{N-1}\left(
+      \sigma_{\min}^{1/\rho} - \sigma_{\max}^{1/\rho}
+    \right)
+  \right)^{\!\rho},
+  \label{eq:sigma_schedule}
+\end{equation}
+with $\sigma_{\min}=0.002$, $\sigma_{\max}=80$, $\rho=7$, $N=18$.
+
+At each step, the Euler estimate is followed by a corrector:
+\begin{align}
+  \bm{d}_i &= \frac{\zvec_i - D_\theta(\zvec_i, \sigma_i, \bm{y})}{\sigma_i},
+  & \text{(Euler tangent)} \label{eq:euler}\\
+  \zvec_{i+1}' &= \zvec_i + (\sigma_{i+1} - \sigma_i)\, \bm{d}_i,
+  & \text{(Euler step)} \\
+  \bm{d}_i' &= \frac{\zvec_{i+1}' - D_\theta(\zvec_{i+1}', \sigma_{i+1}, \bm{y})}{\sigma_{i+1}},
+  & \text{(corrector tangent)} \\
+  \zvec_{i+1} &= \zvec_i + (\sigma_{i+1} - \sigma_i)\, \frac{\bm{d}_i + \bm{d}_i'}{2}.
+  & \text{(Heun step)} \label{eq:heun}
+\end{align}
+
+\subsection{MicroDiT\texorpdfstring{$_{\text{XL/2}}$}{\_XL/2} Architecture}
+
+The backbone is a 1.16B-parameter sparse Diffusion Transformer with:
+\begin{itemize}[nosep]
+  \item Patch size $p=2$, producing $32/2 = 16$ tokens per spatial dimension
+  \item A \emph{patch mixer} before the main transformer (enables 75\% masking during training)
+  \item DFN5B-CLIP text conditioning via cross-attention
+  \item Pre-trained checkpoint: \texttt{dit\_16\_channel\_37M\_real\_and\_synthetic\_data.pt}
+\end{itemize}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Computational Homogenization}
+\label{sec:homog}
+% ════════════════════════════════════════════════════════════════════════════
+
+\subsection{Cell Problem}
+
+Given an RVE $\Omega$ with periodic boundary conditions and spatially
+varying stiffness tensor $\bm{C}(\xvec)$, the cell problem for
+fluctuation field $\bm{\chi}$ under macroscopic strain
+$\epsvec^0$ is:
+\begin{equation}
+  \nabla \cdot \bigl[ \bm{C}(\xvec) : (\epsvec^0 + \epsvec(\bm{\chi})) \bigr] = \bm{0}
+  \quad \text{in } \Omega, \qquad \bm{\chi} \text{ periodic on } \partial\Omega.
+  \label{eq:cell_problem}
+\end{equation}
+The effective stiffness tensor is then:
+\begin{equation}
+  \bm{C}_{\mathrm{eff}} = \langle \bm{C}(\xvec) : (\epsvec^0 + \epsvec(\bm{\chi})) \rangle_\Omega.
+  \label{eq:Ceff}
+\end{equation}
+
+\subsection{Hashin--Shtrikman Lower Bound}
+
+For two-phase composites with phases $r \in \{1,2\}$ having bulk moduli
+$K_r$ and shear moduli $G_r$ with volume fractions $f_r$ ($f_1 + f_2 = 1$),
+the HS lower bound (taking the softer phase as reference) gives:
+\begin{align}
+  K_{\mathrm{HS}}^{-} &= K_1 + \frac{f_2}{\displaystyle \frac{1}{K_2 - K_1} + \frac{f_1}{K_1 + G_1}},
+  \label{eq:hs_K} \\[6pt]
+  G_{\mathrm{HS}}^{-} &= G_1 + \frac{f_2}{\displaystyle \frac{1}{G_2 - G_1} + \frac{f_1(K_1 + 2G_1)}{2G_1(K_1 + G_1)}}.
+  \label{eq:hs_G}
+\end{align}
+
+For plane-stress, the 2D bulk and shear moduli relate to Young's modulus via:
+\begin{equation}
+  K = \frac{E}{2(1-\nu)}, \qquad G = \frac{E}{2(1+\nu)}.
+  \label{eq:KG}
+\end{equation}
+The effective Young's modulus is recovered as:
+\begin{equation}
+  \Eeff = \frac{4\, K_{\mathrm{HS}} \cdot G_{\mathrm{HS}}}{K_{\mathrm{HS}} + G_{\mathrm{HS}}}.
+  \label{eq:Eeff_from_KG}
+\end{equation}
+
+\subsection{Ti-6Al-4V Material Properties}
+\label{sec:material}
+
+The two-phase model uses experimentally measured properties:
+\begin{table}[h]
+  \centering
+  \caption{Material properties used for homogenization.}
+  \label{tab:material}
+  \begin{tabular}{llcc}
+    \toprule
+    Phase & Crystal & $E$ [GPa] & $\nu$ \\
+    \midrule
+    $\alpha$-Ti (HCP) & White pixels & 120.0 & 0.34 \\
+    $\beta$-Ti (BCC) / void & Black pixels & 80.0 & 0.33 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+With these values, the computed effective modulus for the EBSD-derived dataset
+ranges from $\Eeff \in [93,\, 117]$~GPa, consistent with the published
+polycrystalline Ti-6Al-4V modulus of $\approx 110$--$114$~GPa.
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Physics Surrogate: Latent Stiffness Regressor}
+\label{sec:surrogate}
+% ════════════════════════════════════════════════════════════════════════════
+
+\subsection{Architecture}
+
+The surrogate $f_\theta : \R^{16 \times 32 \times 32} \to \R$ is a
+ResNet-18 backbone followed by a two-layer MLP head:
+\begin{equation}
+  f_\theta(\zvec) = \underbrace{W_2\, \mathrm{ReLU}(W_1\, \mathrm{GAP}(\mathrm{ResNet18}(\zvec)) + b_1) + b_2}_{\text{MLP head}},
+\end{equation}
+where $\mathrm{GAP}$ denotes global average pooling over the spatial
+dimensions.
+
+Key design choices:
+\begin{itemize}[nosep]
+  \item \textbf{Self-contained ResNet-18}: Implemented from scratch to avoid \texttt{torchvision} version conflicts.
+  \item \textbf{Input channels}: First convolutional layer accepts $C_{\mathrm{in}}=16$ channels (matching VAE latent depth).
+  \item \textbf{Dropout}: $p=0.1$ in the MLP head for regularization.
+  \item \textbf{Parameter count}: $\approx 11.2$M ($11.18$M backbone + $66$K head).
+\end{itemize}
+
+\subsection{Training Protocol}
+
+The surrogate is trained on $(z_i, \Eeff^{(i)})$ pairs with MSE loss:
+\begin{equation}
+  \loss_{\mathrm{surr}} = \frac{1}{N} \sum_{i=1}^{N} \bigl( f_\theta(\zvec_i) - \Eeff^{(i)} \bigr)^2.
+  \label{eq:surrogate_loss}
+\end{equation}
+
+Optimization uses AdamW \cite{loshchilov2019decoupled}:
+\begin{equation}
+  \theta_{t+1} = \theta_t - \alpha_t \left(
+    \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon} + \lambda_{\mathrm{wd}}\, \theta_t
+  \right),
+\end{equation}
+with $\alpha_0 = 10^{-4}$, $\lambda_{\mathrm{wd}} = 10^{-5}$, and cosine
+annealing of the learning rate:
+\begin{equation}
+  \alpha_t = \alpha_{\min} + \frac{1}{2}(\alpha_0 - \alpha_{\min})
+    \left(1 + \cos\frac{\pi t}{T}\right).
+  \label{eq:cosine_lr}
+\end{equation}
+
+\subsection{Gradient-Flow Verification}
+
+A necessary condition for SDS convergence is that the property gradient
+$\partial \loss_{\mathrm{phys}} / \partial \zvec$ is non-zero.  We verify:
+\begin{equation}
+  \left\| \frac{\partial \loss_{\mathrm{phys}}}{\partial \zvec} \right\|_2
+  = \left\| 2\bigl(f_\theta(\zvec) - \Etar\bigr) \cdot \frac{\partial f_\theta}{\partial \zvec} \right\|_2 > 0.
+  \label{eq:grad_flow}
+\end{equation}
+
+\begin{proposition}[Gradient Flow]
+For a randomly initialized $\zvec \sim \N(\bm{0}, \bm{I})$ and any
+non-degenerate $f_\theta$ (non-zero Jacobian), $\| \nabla_\zvec \loss_{\mathrm{phys}} \| > 0$
+almost surely.
+\end{proposition}
+
+Our verification script confirms $\| \nabla_\zvec \loss \| = 49.95$ for a
+target of \Etar=150~GPa, establishing that the SDS optimization loop will
+receive informative gradients.
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Score Distillation Sampling (Part 2 — Planned)}
+\label{sec:sds}
+% ════════════════════════════════════════════════════════════════════════════
+
+\subsection{SDS Gradient Derivation}
+
+Score Distillation Sampling \cite{poole2023dreamfusion} adapts a pre-trained
+diffusion model as a loss function for optimization.  Given the
+current latent $\zvec$, we add noise $\bm{\epsilon} \sim \N(\bm{0}, \bm{I})$
+at level $\sigma$ to obtain $\zvec_\sigma = \zvec + \sigma\bm{\epsilon}$,
+then compute:
+\begin{equation}
+  \nabla_\zvec \loss_{\mathrm{SDS}} \triangleq w(\sigma)\, \bigl(
+    D_\theta(\zvec_\sigma, \sigma, \bm{y}) - \zvec
+  \bigr),
+  \label{eq:sds_grad}
+\end{equation}
+where $D_\theta$ is the EDM denoiser from \eqref{eq:denoiser} and $w(\sigma)$
+is the EDM weight from \eqref{eq:edm_weight}.
+
+\begin{remark}
+The SDS gradient can be interpreted as the score of the marginal
+distribution $p_\sigma(\zvec)$ under the diffusion model:
+$\nabla_\zvec \loss_{\mathrm{SDS}} \propto -\nabla_\zvec \log p_\sigma(\zvec)$.
+This pushes $\zvec$ toward high-probability regions of the learned data
+manifold.
+\end{remark}
+
+\subsection{Combined Objective}
+
+The full SDS inverse design loop optimizes:
+\begin{equation}
+  \zvec^{(t+1)} = \zvec^{(t)} - \alpha \left(
+    \underbrace{\nabla_\zvec \loss_{\mathrm{SDS}}}_{\text{manifold prior}}
+    + \lambda \underbrace{\nabla_\zvec \loss_{\mathrm{phys}}}_{\text{property target}}
+  \right),
+  \label{eq:sds_update}
+\end{equation}
+where $\lambda$ balances structural realism against physics fidelity.
+
+\begin{algorithm}[H]
+\caption{SDS Inverse Design Loop (Part 2)}
+\label{alg:sds}
+\begin{algorithmic}[1]
+\REQUIRE Pre-trained MicroDiT$_{\text{XL/2}}$ denoiser $D_\theta$, trained
+  surrogate $f_\theta$, target $\Etar$, guidance scale $\omega$
+\STATE $\zvec_0 \sim \N(\bm{0}, \bm{I}) \in \R^{16 \times 32 \times 32}$
+\FOR{$t = 1, \ldots, T$}
+  \STATE Sample $\sigma_t$ from EDM noise schedule \eqref{eq:sigma_schedule}
+  \STATE $\zvec_\sigma \gets \zvec + \sigma_t \bm{\epsilon}$, \quad $\bm{\epsilon} \sim \N(\bm{0}, \bm{I})$
+  \STATE $\hat{\zvec}_0 \gets D_\theta(\zvec_\sigma, \sigma_t, \bm{y})$
+    \hfill \textit{// EDM denoised estimate via} \eqref{eq:denoiser}
+  \STATE $\nabla_{\mathrm{SDS}} \gets w(\sigma_t)(\hat{\zvec}_0 - \zvec)$
+    \hfill \textit{// Score distillation gradient}
+  \STATE $\nabla_{\mathrm{phys}} \gets 2(f_\theta(\zvec) - \Etar) \cdot \pdv{f_\theta}{\zvec}$
+    \hfill \textit{// Physics gradient}
+  \STATE $\zvec \gets \zvec - \alpha(\nabla_{\mathrm{SDS}} + \lambda\,\nabla_{\mathrm{phys}})$
+\ENDFOR
+\STATE $\hat{\xvec} \gets \mathcal{D}_\phi(\zvec / s)$
+  \hfill \textit{// Decode to microstructure via} \eqref{eq:decode}
+\RETURN $\hat{\xvec}$
+\end{algorithmic}
+\end{algorithm}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Dataset and Preprocessing}
+\label{sec:data}
+% ════════════════════════════════════════════════════════════════════════════
+
+\subsection{EBSD Microstructure Data (Zenodo Record 15310081)}
+
+The primary dataset is derived from EBSD (Electron Backscatter Diffraction)
+measurements of Ti-6Al-4V produced by laser powder bed fusion (LPBF)
+\cite{esmaeilzadeh2025}:
+\begin{itemize}[nosep]
+  \item \textbf{Source}: 2 CTF files (Gaussian beam \& Tailored beam), each $1008 \times 666$ pixels
+  \item \textbf{Phases}: Phase 0 (unindexed/$\beta$-Ti), Phase 1 (BCC-Ti), Phase 2 (HCP-$\alpha$-Ti)
+  \item \textbf{Processing}: Binarization $\to$ overlapping $256\times256$ patches (stride=64) $\to$ 8-fold dihedral augmentation
+  \item \textbf{Yield}: 1{,}328 microstructure patches
+\end{itemize}
+
+\subsection{Gaussian Random Field Augmentation}
+
+Synthetic microstructures are generated using spectral GRF sampling.  A
+continuous random field $u(\xvec)$ is constructed as:
+\begin{equation}
+  u(\xvec) = \mathcal{F}^{-1}\!\left[
+    \sqrt{S(\bm{k})} \cdot \hat{\xi}(\bm{k})
+  \right],
+  \qquad \hat{\xi}(\bm{k}) \sim \N_\C(0, 1),
+  \label{eq:grf}
+\end{equation}
+where $S(\bm{k})$ is the radial power spectrum:
+\begin{equation}
+  S(\bm{k}) = \exp\!\left(-\frac{|\bm{k}|^2 \ell^2}{2}\right),
+  \label{eq:power_spectrum}
+\end{equation}
+with correlation length $\ell = 30$~px.  The binary microstructure is obtained
+by thresholding: $\chi(\xvec) = \mathbf{1}[u(\xvec) > \tau]$ with $\tau = 0.5$.
+
+\subsection{Combined Dataset Statistics}
+
+\begin{table}[h]
+  \centering
+  \caption{Dataset composition and label distributions.}
+  \label{tab:dataset}
+  \begin{tabular}{lccc}
+    \toprule
+    Source & Samples & $\vf$ range & $\Eeff$ range [GPa] \\
+    \midrule
+    EBSD Ti-6Al-4V & 1{,}328 & $[0.39,\, 0.95]$ & $[93,\, 117]$ \\
+    GRF synthetic  & 10      & $[0.46,\, 0.64]$ & $[97,\, 109]$ \\
+    \midrule
+    \textbf{Total} & \textbf{1{,}338} & $[0.39,\, 0.95]$ & $[93,\, 117]$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Implementation and Validation}
+\label{sec:implementation}
+% ════════════════════════════════════════════════════════════════════════════
+
+\subsection{Repository Structure}
+
+The codebase is organized into modular packages:
+\begin{itemize}[nosep]
+  \item \texttt{data/} — GRF generation, EBSD processing, Zenodo downloader,
+    FE homogenization, physics labeling, PyTorch dataset
+  \item \texttt{models/} — Ostris VAE wrapper, MicroDiT wrapper, ResNet-18 surrogate
+  \item \texttt{scripts/} — Latent encoding, surrogate training, gradient verification
+  \item \texttt{part2\_sds/} — SDS pipeline (Part~2 placeholder)
+  \item \texttt{tests/} — 16 automated validation tests
+\end{itemize}
+
+\subsection{Validation Suite}
+
+\begin{table}[h]
+  \centering
+  \caption{Validation test results (all 16 tests pass).}
+  \label{tab:tests}
+  \small
+  \begin{tabular}{lll}
+    \toprule
+    Category & Test & Status \\
+    \midrule
+    Configuration & YAML loads without error & \checkmark \\
+    & Required sections present & \checkmark \\
+    & Latent channel consistency (VAE $\leftrightarrow$ surrogate) & \checkmark \\
+    & Train/val/test splits sum to 1 & \checkmark \\
+    \midrule
+    GRF Generator & Output shape $(256 \times 256)$ & \checkmark \\
+    & Binary domain $\{0, 1\}$ & \checkmark \\
+    & Seed reproducibility & \checkmark \\
+    & Volume fraction $\in [0.1, 0.9]$ & \checkmark \\
+    \midrule
+    Physics & VF of solid image $= 1.0$ & \checkmark \\
+    & VF of void image $= 0.0$ & \checkmark \\
+    & $\Eeff$ monotonicity with $\vf$ & \checkmark \\
+    \midrule
+    Surrogate & Forward output shape $(B, 1)$ & \checkmark \\
+    & Single-sample prediction & \checkmark \\
+    & Parameter count $\in [10^6, 10^8]$ & \checkmark \\
+    \midrule
+    Gradient Flow & $\| \nabla_\zvec \loss \| > 0$ & \checkmark \\
+    & Gradient shape matches input & \checkmark \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Conclusion and Part 2 Outlook}
+\label{sec:conclusion}
+% ════════════════════════════════════════════════════════════════════════════
+
+We have established a complete, tested pipeline for the inverse design of
+FGMs using foundation models:
+\begin{enumerate}[nosep]
+  \item A frozen 16-channel VAE provides a compact, information-rich latent
+    representation of Ti-6Al-4V microstructures.
+  \item A ResNet-18 surrogate maps latent codes to effective stiffness with
+    verified gradient flow ($\| \nabla_\zvec \loss \| \approx 50$).
+  \item The Sony MicroDiT$_{\text{XL/2}}$ diffusion model is integrated as
+    a generative prior, with its EDM sampler and denoiser exposed for SDS.
+  \item 1{,}338 microstructure patches are prepared from real EBSD data
+    with physically meaningful labels ($\Eeff \in [93, 117]$~GPa).
+\end{enumerate}
+
+Part~2 will implement Algorithm~\ref{alg:sds} to generate novel
+microstructures satisfying prescribed spatially varying stiffness profiles,
+completing the inverse design loop.
+
+% ── References ──────────────────────────────────────────────────────────────
+
+\begin{thebibliography}{9}
+
+\bibitem{kingma2014auto}
+  Kingma, D.P.\ and Welling, M.\ (2014).
+  Auto-Encoding Variational Bayes.
+  \emph{ICLR}.
+
+\bibitem{sehwag2024microdit}
+  Sehwag, V.\ et al.\ (2024).
+  Stretching Each Dollar: Diffusion Training from Scratch on a Micro-Budget.
+  \emph{arXiv:2407.15811}.
+
+\bibitem{karras2022edm}
+  Karras, T.\ et al.\ (2022).
+  Elucidating the Design Space of Diffusion-Based Generative Models.
+  \emph{NeurIPS}.
+
+\bibitem{poole2023dreamfusion}
+  Poole, B.\ et al.\ (2023).
+  DreamFusion: Text-to-3D using 2D Diffusion.
+  \emph{ICLR}.
+
+\bibitem{loshchilov2019decoupled}
+  Loshchilov, I.\ and Hutter, F.\ (2019).
+  Decoupled Weight Decay Regularization.
+  \emph{ICLR}.
+
+\bibitem{esmaeilzadeh2025}
+  Esmaeilzadeh, R.\ et al.\ (2025).
+  Toward Architected Microstructures Using Advanced Laser Beam Shaping
+  in LPBF of Ti-6Al-4V.
+  \emph{Advanced Functional Materials}, p.2420427.
+
+\bibitem{torquato2002}
+  Torquato, S.\ (2002).
+  \emph{Random Heterogeneous Materials}.
+  Springer.
+
+\bibitem{hashin1963}
+  Hashin, Z.\ and Shtrikman, S.\ (1963).
+  A variational approach to the theory of the elastic behaviour of
+  multiphase materials.
+  \emph{J.\ Mech.\ Phys.\ Solids}, 11(2), 127--140.
+
+\bibitem{zohdi2005}
+  Zohdi, T.I.\ and Wriggers, P.\ (2005).
+  \emph{An Introduction to Computational Micromechanics}.
+  Springer.
+
+\end{thebibliography}
+
+\end{document}
