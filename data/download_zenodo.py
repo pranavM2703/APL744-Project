@@ -10,9 +10,9 @@ instantiations containing alpha-phase grains and porosity, which are
 used for microstructure-sensitive fatigue modelling.
 
 Supported formats:
-    - HDF5 / DREAM.3D (.dream3d, .h5)  → 3D voxel volumes
-    - TIFF stacks (.tif, .tiff)         → 3D image stacks
-    - Pre-sliced PNGs (.png)            → direct copy
+    - HDF5 / DREAM.3D (.dream3d, .h5)  - 3D voxel volumes
+    - TIFF stacks (.tif, .tiff)         - 3D image stacks
+    - Pre-sliced PNGs (.png)            - direct copy
 
 Usage:
     python -m data.download_zenodo \
@@ -122,7 +122,7 @@ def extract_slices_from_hdf5(
     num_slices : int
         Maximum number of slices to extract.
     slice_axis : int
-        Axis along which to slice (0=x, 1=y, 2=z).
+        Axis along which to slice (theta=x, 1=y, 2=z).
     seed : int
         RNG seed for slice selection.
 

@@ -1,6 +1,3 @@
-# ============================================================================
-# 2D Finite Element Homogenization — Effective Elastic Modulus
-# ============================================================================
 """
 Computes the effective elastic modulus E_eff of a 2D binary
 microstructure image using plane-stress finite element homogenization
@@ -12,12 +9,12 @@ Theory:
     Given a representative volume element (RVE) Ω with heterogeneous
     stiffness C(x), we solve the cell problem:
 
-        div( C(x) : (ε⁰ + ε(χ)) ) = 0    in Ω     (periodic BCs)
+        div( C(x) : (epsilon_0 + epsilon(chi)) ) = 0    in Ω     (periodic BCs)
 
-    for the fluctuation field χ under a prescribed macroscopic strain ε⁰.
+    for the fluctuation field chi under a prescribed macroscopic strain epsilon_0.
     The effective stiffness is then:
 
-        C_eff = ⟨C(x) : (ε⁰ + ε(χ))⟩_Ω
+        C_eff = <C(x) : (epsilon_0 + epsilon(chi))>
 
 Reference:
     Zohdi, T.I. & Wriggers, P. (2005). An Introduction to Computational
@@ -79,7 +76,7 @@ def _hashin_shtrikman_lower(
     E_v: float,
     nu_v: float,
 ) -> float:
-    """Hashin–Shtrikman lower bound for 2D effective modulus.
+    """Hashin-Shtrikman lower bound for 2D effective modulus.
 
     This provides a physics-based analytical estimate that is tighter
     than a simple rule-of-mixtures and serves as the fallback when
