@@ -1,6 +1,4 @@
-# ============================================================================
-# SDS Evaluation — Post-hoc Analysis of Inverse Design Results
-# ============================================================================
+
 """
 Evaluates optimized latents from the SDS pipeline:
   1. Decodes latents to microstructure images via VAE
