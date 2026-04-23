@@ -41,13 +41,12 @@
 
 % ── Document ────────────────────────────────────────────────────────────────
 \title{%
-  \textbf{Foundation Models for Inverse Design of\\
-  Functionally Graded Materials}\\[6pt]
-  \large APL744 — Probabilistic Machine Learning in Mechanics\\
-  Part~1: Pipeline Development \& Mathematical Foundations
+  \textbf{Score Distillation Sampling for Physics-Constrained\\[2pt]
+  Inverse Design of Functionally Graded Microstructures}\\[6pt]
+  \large APL744 --- Probabilistic Machine Learning in Mechanics
 }
 \author{Pranav Misra}
-\date{February 2025}
+\date{April 2025}
 
 \begin{document}
 \maketitle
@@ -60,16 +59,27 @@
 
 % ────────────────────────────────────────────────────────────────────────────
 \begin{abstract}
-We present a computational pipeline for the inverse design of functionally
-graded materials (FGMs) using a pre-trained latent diffusion model as a
-generative prior coupled with a differentiable physics surrogate.\footnote{Code available at \url{https://github.com/pranavM2703/APL744-Project}}  The
-pipeline encodes binary Ti-6Al-4V microstructure images into a
-16-dimensional latent space via the Ostris variational autoencoder, trains a
-ResNet-18 stiffness regressor that maps latent codes to effective elastic
-modulus, and verifies end-to-end gradient flow as a prerequisite for Score
-Distillation Sampling (SDS).  All components are implemented, tested
-(16/16~validation tests), and validated against the EBSD-derived
-microstructure dataset from Zenodo (Record~15310081).
+Inverse design of functionally graded materials (FGMs) remains an open
+challenge: the combinatorial search space of binary microstructures and the
+cost of physics evaluations render direct optimization intractable.  We
+propose, for the first time, the use of \emph{Score Distillation Sampling}
+(SDS) --- originally developed for text-to-3D generation --- as the
+optimization engine for microstructure inverse design.
+Our pipeline reformulates the inverse problem in the latent space of a
+pre-trained 16-channel variational autoencoder (Ostris VAE), where a
+lightweight denoising prior trained with Elucidating Diffusion Models (EDM)
+preconditioning constrains optimized latent codes to the learned
+microstructure manifold.  A ResNet-18 physics surrogate, trained on
+EBSD-derived Ti-6Al-4V data (1{,}338 samples), provides differentiable
+gradients toward prescribed stiffness targets.  We introduce a
+\emph{gradient-clipped SDS} formulation with separate scaling and sigma
+annealing that stabilizes the inherently ill-conditioned SDS gradient and
+enables monotonic convergence.  On five stiffness targets spanning
+$[95, 115]$~GPa, the pipeline achieves errors as low as $1.26$~GPa
+($\approx 1.2\%$ relative error), with all predictions falling within the
+physical Ti-6Al-4V range.  Decoded latent codes yield microstructures with
+recognizable $\alpha/\beta$ morphology.  The complete pipeline is
+open-sourced.\footnote{\url{https://github.com/pranavM2703/APL744-Project}}
 \end{abstract}
 
 \tableofcontents
@@ -112,8 +122,47 @@ microstructures.
 
 Direct optimization of \eqref{eq:inverse} is intractable due to the
 combinatorial nature of $\{0,1\}^{|\Omega|}$ and the cost of evaluating
-$\mathcal{H}$.  We therefore reformulate the problem in a continuous latent
-space using a pre-trained generative model.
+$\mathcal{H}$.  Prior approaches include topology optimization
+\cite{zohdi2005}, which requires expensive repeated FE solves, and
+GAN-based generators, which suffer from mode collapse and lack
+differentiable physics feedback.  We propose a fundamentally different
+strategy: reformulating the problem in a continuous latent space using a
+pre-trained generative model and optimizing via Score Distillation Sampling
+(SDS) --- a technique originally developed for text-to-3D generation
+\cite{poole2023dreamfusion} that has not previously been applied to
+materials inverse design.
+
+\subsection{Novelty and Contributions}
+
+Our key contributions are:
+\begin{enumerate}[nosep]
+  \item \textbf{First application of SDS to microstructure inverse design.}
+    We bridge the gap between computer vision foundation models and
+    computational mechanics, demonstrating that diffusion priors trained
+    on microstructure images can enforce physical admissibility during
+    latent-space optimization.
+
+  \item \textbf{Gradient-clipped SDS with dual-scale weighting.}
+    We identify a critical instability in na\"{\i}ve SDS applied to
+    physics-constrained problems --- the SDS gradient norm grows by
+    $\sim\!15\times$ during sigma annealing, overwhelming the physics
+    gradient.  We resolve this with a novel formulation combining
+    separate $\lambda_{\mathrm{SDS}} / \lambda_{\mathrm{phys}}$ scaling,
+    gradient norm clipping, and linear sigma annealing
+    (\S\ref{sec:phase2}).
+
+  \item \textbf{Lightweight latent-space denoiser with EDM preconditioning.}
+    When the full 1.16B-parameter MicroDiT is unavailable, we show that
+    a 4-block residual denoiser trained directly on VAE latents (15~epochs,
+    $<$2~minutes) serves as an effective SDS prior, achieving
+    sub-2~GPa accuracy on mid-range targets.
+
+  \item \textbf{End-to-end differentiable pipeline on real EBSD data.}
+    Unlike prior works that use synthetic-only datasets, we train on
+    1{,}338 real Ti-6Al-4V microstructure patches from EBSD measurements
+    with physically computed labels, achieving RMSE $\approx 1.23$~GPa
+    on the surrogate.
+\end{enumerate}
 
 \subsection{Latent-Space Reformulation}
 
@@ -845,19 +894,42 @@ the learned data distribution rather than drifting to adversarial regions.
 \label{sec:discussion}
 % ════════════════════════════════════════════════════════════════════════════
 
-\subsection{Key Contributions}
+\subsection{Significance and Positioning}
 
-This work establishes a complete, modular pipeline connecting three
-distinct components:
-\begin{enumerate}[nosep]
-  \item A \textbf{generative prior} (MicroDiT$_{\text{XL/2}}$ or lightweight
-    substitute) that constrains inverse-designed microstructures to be
-    physically realistic.
-  \item A \textbf{differentiable physics surrogate} ($f_\theta$: ResNet-18)
-    that maps latent codes to effective stiffness with verified gradient flow.
-  \item A \textbf{gradient-clipped SDS loop} that balances manifold adherence
-    against property matching.
-\end{enumerate}
+This work lies at the intersection of three rapidly evolving fields:
+
+\paragraph{1. Diffusion models for scientific inverse problems.}
+While SDS \cite{poole2023dreamfusion} has driven breakthroughs in
+text-to-3D and text-to-image, its application to \emph{materials
+science} inverse problems is, to our knowledge, entirely novel.  Prior
+microstructure generation works rely on GANs or VAEs without
+physics-in-the-loop gradients.  Our framework demonstrates that SDS
+naturally combines a learned manifold constraint (via the denoising
+prior) with a differentiable physics objective --- a paradigm broadly
+applicable to any inverse problem admitting a surrogate gradient.
+
+\paragraph{2. Latent-space materials design.}
+Topology optimization operates in pixel space ($256^2 = 65{,}536$ DOFs)
+and requires repeated FE solves.  By mapping to a $16 \times 32 \times 32$
+latent code (16{,}384 DOFs) via a frozen foundation-model VAE, we reduce
+the effective dimensionality by $4\times$ while inheriting the encoder's
+semantic structure.  The surrogate further amortizes the cost of FE
+homogenization into a single forward pass.
+
+\paragraph{3. Data-efficient stiffness prediction.}
+With only 1{,}338 real EBSD-derived samples, the ResNet-18 surrogate
+achieves RMSE $\approx 1.23$~GPa ($\approx 1.1\%$ relative error over
+the $[93, 117]$~GPa range).  This data efficiency is enabled by
+operating in VAE latent space rather than raw pixel space, where a
+comparable CNN would require orders of magnitude more data.
+
+\paragraph{4. Stabilized SDS for constrained optimization.}
+Standard SDS was designed for \emph{unconditional} or text-conditioned
+generation.  We show that coupling it with a hard physics loss creates a
+gradient imbalance that causes divergence.  Our gradient-clipped
+formulation (Eq.~\ref{eq:grad_clip}) is the first, to our knowledge, to
+address this issue in the materials design context, and the technique is
+generalizable to any SDS application with auxiliary loss terms.
 
 \subsection{Limitations and Future Work}
 
